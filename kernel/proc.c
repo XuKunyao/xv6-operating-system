@@ -6,47 +6,57 @@
 #include "proc.h"
 #include "defs.h"
 
-struct cpu cpus[NCPU];
+struct cpu cpus[NCPU];// CPU 结构数组
 
-struct proc proc[NPROC];
+struct proc proc[NPROC];// 进程结构数组
 
-struct proc *initproc;
+struct proc *initproc;// 初始化进程指针
 
-int nextpid = 1;
-struct spinlock pid_lock;
+int nextpid = 1;// 下一个进程 ID
+struct spinlock pid_lock;// PID 锁
 
-extern void forkret(void);
-static void wakeup1(struct proc *chan);
-static void freeproc(struct proc *p);
+extern void forkret(void);// fork 后的返回函数
+static void wakeup1(struct proc *chan);// 唤醒单个进程
+static void freeproc(struct proc *p);// 释放进程结构
 
 extern char trampoline[]; // trampoline.S
 
-// initialize the proc table at boot time.
+/**
+  * void procinit()
+  * @brief: 初始化进程表，在引导时调用。
+  * @param: NULL
+  * @retval: NULL
+  */
 void
 procinit(void)
 {
   struct proc *p;
   
-  initlock(&pid_lock, "nextpid");
+  initlock(&pid_lock, "nextpid");// 初始化 PID 锁
   for(p = proc; p < &proc[NPROC]; p++) {
-      initlock(&p->lock, "proc");
+      initlock(&p->lock, "proc");// 初始化每个进程的锁
 
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
+      // 为进程的内核栈分配一个页面。
+      // 将其映射到高地址内存，后面跟着一个无效的保护页面。
+      char *pa = kalloc();// 分配内存
       if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+        panic("kalloc");// 分配失败则崩溃
+      uint64 va = KSTACK((int) (p - proc));// 计算内核栈的虚拟地址
+      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);// 映射物理地址到虚拟地址
+      p->kstack = va;// 设置进程的内核栈
   }
-  kvminithart();
+  kvminithart();// 初始化虚拟内存
 }
 
-// Must be called with interrupts disabled,
-// to prevent race with process being moved
-// to a different CPU.
+/**
+  * int cpuid()
+  * @brief: 返回当前 CPU 的 ID。
+  * @brief: Must be called with interrupts disabled,
+            to prevent race with process being moved
+            to a different CPU.
+  * @param: NULL
+  * @retval: 当前 CPU 的 ID。
+  */
 int
 cpuid()
 {
@@ -54,66 +64,90 @@ cpuid()
   return id;
 }
 
-// Return this CPU's cpu struct.
-// Interrupts must be disabled.
+/**
+  * struct cpu* mycpu(void)
+  * @brief： 返回当前 CPU 的 cpu 结构
+  * @brief： Return this CPU's cpu struct.
+             Interrupts must be disabled.
+  * @param： NULL
+  * @retval： 当前 CPU 的 cpu 结构指针
+  */
 struct cpu*
 mycpu(void) {
-  int id = cpuid();
-  struct cpu *c = &cpus[id];
+  int id = cpuid();// 获取 CPU ID
+  struct cpu *c = &cpus[id];// 获取对应的 cpu 结构
   return c;
 }
 
-// Return the current struct proc *, or zero if none.
+/**
+  * struct proc* myproc(void)
+  * @brief： 返回当前进程的 proc 结构，如果没有则返回 NULL
+  * @brief： Return the current struct proc *, or zero if none.
+  * @param： NULL
+  * @retval： 当前进程的 proc 结构指针或 NULL
+  */
 struct proc*
 myproc(void) {
-  push_off();
-  struct cpu *c = mycpu();
-  struct proc *p = c->proc;
-  pop_off();
+  push_off();// 禁用中断
+  struct cpu *c = mycpu();// 获取当前 CPU
+  struct proc *p = c->proc;// 获取当前进程
+  pop_off();// 恢复中断
   return p;
 }
 
+/**
+  * int allocpid()
+  * @brief： 分配一个新的进程 ID
+  * @param： NULL
+  * @retval： 分配的进程 ID
+  */
 int
 allocpid() {
   int pid;
   
-  acquire(&pid_lock);
-  pid = nextpid;
-  nextpid = nextpid + 1;
-  release(&pid_lock);
+  acquire(&pid_lock);// 获取 PID 锁
+  pid = nextpid;// 获取当前下一个 PID
+  nextpid = nextpid + 1;// 更新下一个 PID
+  release(&pid_lock);// 释放 PID 锁
 
-  return pid;
+  return pid;// 返回分配的 PID
 }
 
-// Look in the process table for an UNUSED proc.
-// If found, initialize state required to run in the kernel,
-// and return with p->lock held.
-// If there are no free procs, or a memory allocation fails, return 0.
+/**
+  * static struct proc* allocproc(void)
+  * @brief： 在进程表中查找一个未使用的进程
+  * @brief： Look in the process table for an UNUSED proc.
+             If found, initialize state required to run in the kernel,
+             and return with p->lock held.
+             If there are no free procs, or a memory allocation fails, return 0.
+  * @param： NULL
+  * @retval： 返回找到的进程指针，失败时返回 NULL
+  */
 static struct proc*
 allocproc(void)
 {
   struct proc *p;
 
   for(p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
-    if(p->state == UNUSED) {
-      goto found;
+    acquire(&p->lock);// 获取进程锁
+    if(p->state == UNUSED) {// 如果进程状态为未使用
+      goto found;// 跳转到找到的标记
     } else {
-      release(&p->lock);
+      release(&p->lock);// 释放锁
     }
   }
-  return 0;
+  return 0;// 没有可用进程，返回 NULL
 
 found:
-  p->pid = allocpid();
+  p->pid = allocpid();// 分配进程 ID
 
-  // Allocate a trapframe page.
+  // 分配一个 trapframe 页
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
-    release(&p->lock);
-    return 0;
+    release(&p->lock);// 分配失败，释放锁
+    return 0;// 返回 NULL
   }
 
-  // An empty user page table.
+  // 初始化空的用户页表
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
     freeproc(p);
@@ -121,78 +155,94 @@ found:
     return 0;
   }
 
-  // Set up new context to start executing at forkret,
-  // which returns to user space.
-  memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)forkret;
-  p->context.sp = p->kstack + PGSIZE;
+  // 设置新的上下文以开始执行 forkret
+  // 该函数返回到用户空间
+  memset(&p->context, 0, sizeof(p->context));// 清空上下文
+  p->context.ra = (uint64)forkret;// 设置返回地址
+  p->context.sp = p->kstack + PGSIZE;// 设置堆栈指针
 
-  return p;
+  return p;// 返回分配的进程
 }
 
-// free a proc structure and the data hanging from it,
-// including user pages.
-// p->lock must be held.
+/**
+  * static void freeproc(struct proc *p)
+  * @brief： 释放进程结构及其关联的数据，包括用户页面
+  * @brief： free a proc structure and the data hanging from it,
+             including user pages.
+             p->lock must be held.
+  * @param： p：待释放的进程指针
+  * @retval： NULL
+  */
 static void
 freeproc(struct proc *p)
 {
   if(p->trapframe)
-    kfree((void*)p->trapframe);
-  p->trapframe = 0;
+    kfree((void*)p->trapframe); // 释放 trapframe
+  p->trapframe = 0; // 设置为 NULL
   if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
-  p->pagetable = 0;
-  p->sz = 0;
-  p->pid = 0;
-  p->parent = 0;
-  p->name[0] = 0;
-  p->chan = 0;
-  p->killed = 0;
-  p->xstate = 0;
-  p->state = UNUSED;
+    proc_freepagetable(p->pagetable, p->sz); // 释放页表
+  p->pagetable = 0; // 设置为 NULL
+  p->sz = 0; // 用户内存大小设为 0
+  p->pid = 0; // 设置 PID 为 0
+  p->parent = 0; // 设置父进程为 0
+  p->name[0] = 0; // 清空进程名称
+  p->chan = 0; // 设置通道为 0
+  p->killed = 0; // 设置被杀标志为 0
+  p->xstate = 0; // 清空退出状态
+  p->state = UNUSED; // 设置状态为未使用
+  p->trace_mask = 0; // 清空跟踪掩码
 }
 
-// Create a user page table for a given process,
-// with no user memory, but with trampoline pages.
+/**
+  * pagetable_t proc_pagetable(struct proc *p)
+  * @brief： 为给定进程创建用户页表，初始无用户内存，但包含 trampoline 页面
+  * @brief： Create a user page table for a given process,
+             with no user memory, but with trampoline pages.
+  * @param： p：目标进程指针
+  * @retval： 创建的页表指针
+  */
 pagetable_t
 proc_pagetable(struct proc *p)
 {
   pagetable_t pagetable;
 
-  // An empty page table.
+  // 创建空的页表
   pagetable = uvmcreate();
   if(pagetable == 0)
     return 0;
 
-  // map the trampoline code (for system call return)
-  // at the highest user virtual address.
-  // only the supervisor uses it, on the way
-  // to/from user space, so not PTE_U.
+  // 在最高的用户虚拟地址处映射 trampoline 代码。
+  // 仅供管理员使用，在用户空间传递时使用，所以不设置 PTE_U。
   if(mappages(pagetable, TRAMPOLINE, PGSIZE,
               (uint64)trampoline, PTE_R | PTE_X) < 0){
-    uvmfree(pagetable, 0);
+    uvmfree(pagetable, 0);// 释放页表
     return 0;
   }
 
-  // map the trapframe just below TRAMPOLINE, for trampoline.S.
+  // 将 trapframe 映射到 TRAMPOLINE 下面，为 trampoline.S.
   if(mappages(pagetable, TRAPFRAME, PGSIZE,
               (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
-    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable, 0);
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);// 取消映射 trampoline
+    uvmfree(pagetable, 0);// 释放页表
     return 0;
   }
 
-  return pagetable;
+  return pagetable;// 返回创建的页表
 }
 
-// Free a process's page table, and free the
-// physical memory it refers to.
+/**
+  * void proc_freepagetable(pagetable_t pagetable, uint64 sz)
+  * @brief： 释放进程的页表，并释放其引用的物理内存
+  * @param： pagetable：待释放的页表指针
+  * @param： sz：进程大小
+  * @retval： NULL
+  */
 void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
-  uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-  uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmfree(pagetable, sz);
+  uvmunmap(pagetable, TRAMPOLINE, 1, 0);// 取消映射 trampoline
+  uvmunmap(pagetable, TRAPFRAME, 1, 0);// 取消映射 trapframe
+  uvmfree(pagetable, sz);// 释放页表和引用的物理内存
 }
 
 // a user program that calls exec("/init")
@@ -282,6 +332,9 @@ fork(void)
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
+  
+  // 在子进程中拷贝trace_mask
+  np->trace_mask = p->trace_mask;
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
@@ -583,8 +636,13 @@ sleep(void *chan, struct spinlock *lk)
   }
 }
 
-// Wake up all processes sleeping on chan.
-// Must be called without any p->lock.
+/**
+  * void wakeup(void *chan)
+  * @brief： 唤醒所有在指定通道上等待的进程
+  * @brief： Must be called without any p->lock.
+  * @param： chan：通道指针
+  * @retval： NULL
+  */
 void
 wakeup(void *chan)
 {
@@ -599,8 +657,14 @@ wakeup(void *chan)
   }
 }
 
-// Wake up p if it is sleeping in wait(); used by exit().
-// Caller must hold p->lock.
+/**
+  * static void wakeup1(struct proc *chan)
+  * @brief： 唤醒在指定通道上等待的单个进程
+  * @brief： Wake up p if it is sleeping in wait(); used by exit().
+             Caller must hold p->lock.
+  * @param： chan：通道指针
+  * @retval： NULL
+  */
 static void
 wakeup1(struct proc *p)
 {
@@ -692,4 +756,20 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64
+acquire_nproc(void)
+{
+  struct proc *p;
+  int cnt = 0;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      cnt++;
+    }
+    release(&p->lock);
+  }
+  return cnt;
 }
