@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "stat.h": "c",
+        "user.h": "c",
+        "typeinfo": "c"
+    },
+    "makefile.configureOnOpen": false
+}
