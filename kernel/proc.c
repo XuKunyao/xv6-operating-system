@@ -113,6 +113,13 @@ found:
     return 0;
   }
 
+  // Allocate a usyscall page.
+  if((p->usyscall = (struct usyscall *)kalloc()) == 0){
+    release(&p->lock);
+    return 0;
+  }
+  p->usyscall->pid = p->pid;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,6 +146,9 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->usyscall)
+    kfree((void*)p->usyscall);
+  p->usyscall = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -152,37 +162,51 @@ freeproc(struct proc *p)
   p->state = UNUSED;
 }
 
-// Create a user page table for a given process,
-// with no user memory, but with trampoline pages.
+/**
+  * pagetable_t proc_pagetable(struct proc *p)
+  * @brief： 为给定进程创建用户页表，初始无用户内存，但包含 trampoline 页面
+  * @brief： Create a user page table for a given process,
+             with no user memory, but with trampoline pages.
+  * @param： p：目标进程指针
+  * @retval： 创建的页表指针
+  */
 pagetable_t
 proc_pagetable(struct proc *p)
 {
   pagetable_t pagetable;
 
-  // An empty page table.
+  // 创建空的页表
   pagetable = uvmcreate();
   if(pagetable == 0)
     return 0;
 
-  // map the trampoline code (for system call return)
-  // at the highest user virtual address.
-  // only the supervisor uses it, on the way
-  // to/from user space, so not PTE_U.
+  // 在最高的用户虚拟地址处映射 trampoline 代码。
+  // 仅供管理员使用，在用户空间传递时使用，所以不设置 PTE_U。
   if(mappages(pagetable, TRAMPOLINE, PGSIZE,
               (uint64)trampoline, PTE_R | PTE_X) < 0){
-    uvmfree(pagetable, 0);
+    uvmfree(pagetable, 0);// 释放页表
     return 0;
   }
 
-  // map the trapframe just below TRAMPOLINE, for trampoline.S.
+  // 将 trapframe 映射到 TRAMPOLINE 下面，为 trampoline.S.
   if(mappages(pagetable, TRAPFRAME, PGSIZE,
               (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
-    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable, 0);
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);// 取消映射 trampoline
+    uvmfree(pagetable, 0);// 释放页表
     return 0;
   }
 
-  return pagetable;
+  // 将 USYSCALL 映射到 trapframe下面的 USYSCALL
+  if(mappages(pagetable, USYSCALL, PGSIZE,
+              (uint64)p->usyscall, PTE_R | PTE_U) < 0){ //PTE_U 代表可被用户程序访问的
+    uvmunmap(pagetable, USYSCALL, 1, 0);
+    uvmunmap(pagetable, TRAPFRAME, 1, 0);// 取消映射 trapframe
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);// 取消映射 trampoline
+    uvmfree(pagetable, 0);// 释放页表
+    return 0;
+  }
+
+  return pagetable;// 返回创建的页表
 }
 
 // Free a process's page table, and free the
