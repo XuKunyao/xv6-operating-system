@@ -19,6 +19,12 @@ extern void forkret(void);// fork 后的返回函数
 static void wakeup1(struct proc *chan);// 唤醒单个进程
 static void freeproc(struct proc *p);// 释放进程结构
 
+pagetable_t ukvminit();
+void ukvmmap(pagetable_t kpagetable, uint64 va, uint64 pa, uint64 sz, int perm);
+void freeprockvm(struct proc* p);
+int pagecopy(pagetable_t oldpage, pagetable_t newpage, uint64 begin, uint64 end);
+void ukvminithard(pagetable_t page);
+
 extern char trampoline[]; // trampoline.S
 
 /**
@@ -155,6 +161,22 @@ found:
     return 0;
   }
 
+  // 为这个进程分配并初始化一个新的专属内核页
+  p->kpagetable = ukvminit();
+  if(p->pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 每个kernel stack的虚拟地址va是已经提前决定好的 直接算出它对应的pa
+  // 然后把这个映射加入到新的专属内核页里
+  uint64 va = KSTACK((int) (p - proc)); // 计算每个进程的内核栈的虚拟地址
+  pte_t pa = kvmpa(va); //找到虚拟地址 va 对应的物理地址 pa
+  memset((void *)pa, 0, PGSIZE); // 刷新清空pa地址对应的kernel stack
+  ukvmmap(p->kpagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W); //创建映射关系
+  p->kstack = va; // 设置进程的内核栈
+
   // 设置新的上下文以开始执行 forkret
   // 该函数返回到用户空间
   memset(&p->context, 0, sizeof(p->context));// 清空上下文
@@ -191,6 +213,13 @@ freeproc(struct proc *p)
   p->xstate = 0; // 清空退出状态
   p->state = UNUSED; // 设置状态为未使用
   p->trace_mask = 0; // 清空跟踪掩码
+  if (p->kpagetable) {
+    freeprockvm(p);
+    p->kpagetable = 0;
+  }
+  if (p->kstack) {
+    p->kstack = 0;
+  }
 }
 
 /**
@@ -275,6 +304,8 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;// 设置进程大小为页面大小
 
+  pagecopy(p->pagetable, p->kpagetable, 0, p->sz);
+
   // 准备从内核第一次返回到用户态
   p->trapframe->epc = 0;      // 用户程序计数器设置为0
   p->trapframe->sp = PGSIZE;  // 设置用户栈指针为页面大小
@@ -301,12 +332,22 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    // 内核页的虚拟地址不能溢出PLIC
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+      return -1;
+    }
+    if (pagecopy(p->pagetable, p->kpagetable, p->sz, sz) != 0) {
+      // 增量同步[old size, new size]
       return -1;
     }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);// 释放内存
+    if (sz != p->sz) {
+      // 缩量同步[new size, old size]
+      uvmunmap(p->kpagetable, PGROUNDUP(sz), (PGROUNDUP(p->sz) - PGROUNDUP(sz)) / PGSIZE, 0);
+    }
   }
+  ukvminithard(p->kpagetable);
   p->sz = sz;// 更新进程的内存大小
   return 0;// 成功返回 0
 }
@@ -338,6 +379,12 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // 复制用户页表到内核页表
+  if (pagecopy(np->pagetable, np->kpagetable, 0, np->sz) != 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
   np->parent = p;
 
   // 复制保存的用户寄存器
@@ -529,17 +576,17 @@ wait(uint64 addr)
 /**
   * void scheduler(void)
   * @brief： 每个 CPU 的进程调度程序
+  * @brief： // Per-CPU process scheduler.
+             // Each CPU calls scheduler() after setting itself up.
+             // Scheduler never returns.  It loops, doing:
+             //  - choose a process to run.
+             //  - swtch to start running that process.
+             //  - eventually that process transfers control
+             //    via swtch back to the scheduler.
   * @param： NULL
   * @retval： NULL
   */
 
-// Per-CPU process scheduler.
-// Each CPU calls scheduler() after setting itself up.
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
-//  - swtch to start running that process.
-//  - eventually that process transfers control
-//    via swtch back to the scheduler.
 void
 scheduler(void)
 {
@@ -559,8 +606,14 @@ scheduler(void)
         // 释放其锁，然后在返回之前重新获取它。
         p->state = RUNNING;// 设置状态为运行
         c->proc = p;// 设置当前进程
+        
+        // 切换到要马上运行的新进程的内核页表
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
         swtch(&c->context, &p->context);// 切换上下文
 
+        // 切换回全局内核页表
+        kvminithart();
         // 进程现在完成运行。
         // 它应该在回来之前更改其 p->state。
         c->proc = 0;

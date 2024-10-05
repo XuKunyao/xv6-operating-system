@@ -9,6 +9,8 @@
 
 static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
 
+int pagecopy(pagetable_t oldpage, pagetable_t newpage, uint64 begin, uint64 end);
+
 int
 exec(char *path, char **argv)
 {
@@ -115,6 +117,16 @@ exec(char *path, char **argv)
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
+
+    // 复制新的kernel page并刷新TLB
+  if (pagecopy(p->pagetable, p->kpagetable, 0, p->sz) != 0) {
+    goto bad;
+  }
+  // 因为load进来了新的program, 刷新一下内存映射
+  w_satp(MAKE_SATP(p->kpagetable));
+  sfence_vma();
+
+  if(p->pid==1) vmprint(p->pagetable, 0);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
