@@ -99,9 +99,13 @@ struct proc {
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
-  struct usyscall *usyscall;   // data page for USYSCALL
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int ticks;                   // 每当程序消耗了CPU时间达到ticks个“滴答”，内核应当使应用程序函数hander被调用
+  int ticks_cnt;               // 于跟踪自上一次调用（或直到下一次调用）到进程的报警处理程序间经历了多少滴答
+  struct trapframe *ticks_trapframe; // 执行handler的时候用户的寄存器被handler替换，ticks_trapframe用于保存和恢复之前的trapframe
+  uint64 handler;              // 应用程序函数
+  int handler_off;             // 确保调用handler时，它没有已经在运行，避免对处理程序的重复调用
 };

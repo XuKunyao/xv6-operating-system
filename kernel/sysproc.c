@@ -70,6 +70,7 @@ sys_sleep(void)
     sleep(&ticks, &tickslock);
   }
   release(&tickslock);
+  backtrace();
   return 0;
 }
 
@@ -94,4 +95,31 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_sigalarm(void)
+{
+  int ticks; // 接受sigalarm系统调用的第0个参数
+  uint64 handler; // 接受系统调用的第1个参数
+  if(argint(0, &ticks) < 0) // argint从a0寄存器中获取第一个参数传递给ticks
+    return -1;
+  if(argaddr(1, &handler) < 0) // argaddr从a1寄存器中获取第二个参数传递给handler
+    return -1;
+
+  struct proc *p = myproc(); // 返回当前正在运行的进程结构体指针
+  p->ticks = ticks;
+  p->ticks_cnt = 0;
+  p->handler = handler;
+  
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  *p->trapframe = *p->ticks_trapframe; // 恢复上下文，ticks_trapframe存储的是alarm之前的寄存器信息
+  p->handler_off = 0; // 关闭handler函数标志位防止重复调用
+  return 0;
 }

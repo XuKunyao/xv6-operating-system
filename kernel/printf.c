@@ -122,6 +122,7 @@ panic(char *s)
   printf(s);
   printf("\n");
   panicked = 1; // freeze uart output from other CPUs
+  backtrace();
   for(;;)
     ;
 }
@@ -131,4 +132,14 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+void backtrace() {
+  uint64 fp = r_fp();
+  while(fp != PGROUNDUP(fp)) { // 如果已经到达栈底
+    uint64 *frame = (uint64 *)fp; // 将fp转换为指针类型
+    uint64 ra = frame[-1]; // uint64 通常是 8 字节，-1就是向下移动8字节
+    printf("%p\n", ra);
+    fp = frame[-2]; // previous fp
+  }
 }
