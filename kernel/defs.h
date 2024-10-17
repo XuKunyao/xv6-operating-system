@@ -80,13 +80,14 @@ int             pipewrite(struct pipe*, uint64, int);
 void            printf(char*, ...);
 void            panic(char*) __attribute__((noreturn));
 void            printfinit(void);
-void            backtrace(void);
 
 // proc.c
 int             cpuid(void);
 void            exit(int);
 int             fork(void);
 int             growproc(int);
+int             is_lazy_alloc_va(uint64 va);
+int             lazy_alloc(uint64 va);
 pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
 int             kill(int);

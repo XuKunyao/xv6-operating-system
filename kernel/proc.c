@@ -113,16 +113,6 @@ found:
     return 0;
   }
 
-  // Allocate a ticks_trapframe page.
-  if((p->ticks_trapframe = (struct trapframe *)kalloc()) == 0){
-    release(&p->lock);
-    return 0;
-  }
-  // 将proc结构体中的参数初始化为0
-  p->ticks =0;
-  p->ticks_cnt = 0;
-  p->handler_off = 0;
-
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -160,12 +150,6 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
-  if(p->ticks_trapframe)
-    kfree((void*)p->ticks_trapframe);
-  p->ticks_trapframe = 0;
-  p->ticks = 0;
-  p->ticks_cnt =0;
-  p->handler_off = 0;
 }
 
 // Create a user page table for a given process,
@@ -266,6 +250,40 @@ growproc(int n)
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
+  return 0;
+}
+
+// 判断是否是lazy alloc引起的page fault
+int 
+is_lazy_alloc_va(uint64 va){
+  struct proc *p = myproc(); // 获取当前进程结构体
+  if(va >= p->sz){ // 如果va地址大于当前进程的sz地址
+    return 0;
+  }
+  // 栈指针向下取整到栈指针向下取整减一个PGSIZE之间对应的范围就是guard page
+  // 如果va地址落入保护页则不进行懒分配，否则会报remap错误
+  if(va < PGROUNDDOWN(p->trapframe->sp) && va >= PGROUNDDOWN(p->trapframe->sp) - PGSIZE){
+    return 0;
+  }
+  return 1;
+}
+
+// 进行lazy alloc
+// 本函数参照uvmalloc()函数
+int
+lazy_alloc(uint64 va){
+  char *mem; // 用于存储分配的内存
+  va = PGROUNDDOWN(va); // va向下取整
+  mem = kalloc(); // 分配内存
+  if(mem == 0){ // 检查内存是否分配成功
+    return -1;  // 如果失败，返回-1
+  }
+  memset(mem, 0, PGSIZE); // 初始化分配的内存
+  struct proc *p = myproc(); // 获取当前进程结构体
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+    kfree(mem); // 如果映射失败，释放内存
+    return -1;
+  }
   return 0;
 }
 
@@ -480,9 +498,12 @@ scheduler(void)
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
     
-    int found = 0;
+    int nproc = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
+      if(p->state != UNUSED) {
+        nproc++;
+      }
       if(p->state == RUNNABLE) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
@@ -494,19 +515,13 @@ scheduler(void)
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
-
-        found = 1;
       }
       release(&p->lock);
     }
-#if !defined (LAB_FS)
-    if(found == 0) {
+    if(nproc <= 2) {   // only init and sh exist
       intr_on();
       asm volatile("wfi");
     }
-#else
-    ;
-#endif
   }
 }
 

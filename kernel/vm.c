@@ -101,12 +101,15 @@ walkaddr(pagetable_t pagetable, uint64 va)
     return 0;
 
   pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    return 0;
-  if((*pte & PTE_V) == 0)
-    return 0;
-  if((*pte & PTE_U) == 0)
-    return 0;
+  if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0){ // 如果访问到懒分配还没实际分配的页
+    if(is_lazy_alloc_va(va)){ // 判断是否是懒分配造成的
+      if(lazy_alloc(va) < 0){ // 如果是懒分配造成的，调用 lazy_alloc 函数分配内存或映射
+        return 0; // 如果分配内存或映射失败，返回 0
+      }
+      return walkaddr(pagetable, va); // 如果分配成功，重新获取地址并返回物理地址(此时不会再进入if判断，因为已经映射pte)
+    }
+    return 0; // 不是懒分配导致的无效或空页表项，直接返回 0
+  }
   pa = PTE2PA(*pte);
   return pa;
 }
@@ -181,9 +184,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
+      // panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
+      // panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +320,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
+      // panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
+      // panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
