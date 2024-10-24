@@ -65,20 +65,21 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if((which_dev = devintr()) != 0){  // 如果是设备中断，则标记设备中断已处理
     // ok
-  } else if (r_scause() == 13 || r_scause() == 15){ //保证引起trap的原因是page fault
-    uint64 va = r_stval(); // 获取引起page fault的内存地址
-    if(is_lazy_alloc_va(va)){ // 如果va是由lazy alloc导致的page fault
-      if(lazy_alloc(va) < 0){ // 执行lazy alloc并判断是否出现内存不足(小于0)
-        printf("lazy_alloc fail!\n");
-        p->killed = 1; // 杀掉进程
+  } else if(r_scause() == 13 || r_scause() == 15){ // 如果 `scause` 表示页错误（13 或 15），并且是写时拷贝 (COW) 引发的页错误
+    uint64 va = r_stval();  // 从r_stval寄存器获取触发页错误的虚拟地址
+    if(is_cow_fault(p->pagetable, va)){ // 检查该页是否为 COW 页
+      if(cow_alloc(p->pagetable, va) < 0){ // 如果是 COW 页，调用cow_alloc分配新的物理页并复制内容
+        printf("usertrap():cow_alloc failed!"); // 如果分配失败，打印错误信息并杀掉进程
+        p->killed = 1;
       }
+    } else{ // 如果不是 COW 页，打印错误信息并杀掉进程
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
     }
-    else{
-      p->killed = 1; // 杀掉进程
-    }
-  } else {
+  } else { // 处理未预期的异常情况，打印调试信息并终止进程
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -179,53 +180,46 @@ clockintr()
   release(&tickslock);
 }
 
-// check if it's an external interrupt or software interrupt,
-// and handle it.
-// returns 2 if timer interrupt,
-// 1 if other device,
-// 0 if not recognized.
+// 检查是否是外部中断或软件中断，并进行处理。
+// 如果是定时器中断，则返回 2；
+// 如果是其他设备中断，则返回 1；
+// 如果未识别中断，则返回 0
 int
 devintr()
 {
-  uint64 scause = r_scause();
+  uint64 scause = r_scause(); // 读取中断原因寄存器 scause
 
-  if((scause & 0x8000000000000000L) &&
-     (scause & 0xff) == 9){
-    // this is a supervisor external interrupt, via PLIC.
+  if((scause & 0x8000000000000000L) && // 检查 scause 寄存器的高位是否为 1，并且低 8 位是否为 9，
+     (scause & 0xff) == 9){ // 表示这是来自 PLIC 的 supervisor 外部中断
 
-    // irq indicates which device interrupted.
-    int irq = plic_claim();
+    int irq = plic_claim();  // irq 表示哪个设备发出了中断
 
-    if(irq == UART0_IRQ){
-      uartintr();
-    } else if(irq == VIRTIO0_IRQ){
-      virtio_disk_intr();
-    } else if(irq){
+    if(irq == UART0_IRQ){ // 根据中断号处理对应的设备中断
+      uartintr(); // 处理 UART 中断
+    } else if(irq == VIRTIO0_IRQ){ 
+      virtio_disk_intr(); // 处理 VirtIO 磁盘中断
+    } else if(irq){ // 如果是意外的中断，打印错误信息
       printf("unexpected interrupt irq=%d\n", irq);
     }
 
-    // the PLIC allows each device to raise at most one
-    // interrupt at a time; tell the PLIC the device is
-    // now allowed to interrupt again.
+    // PLIC 允许每个设备在同一时间最多只引发一个中断；
+    // 通知 PLIC 该设备现在可以再次产生中断
     if(irq)
       plic_complete(irq);
 
-    return 1;
-  } else if(scause == 0x8000000000000001L){
-    // software interrupt from a machine-mode timer interrupt,
-    // forwarded by timervec in kernelvec.S.
+    return 1; // 返回 1，表示处理了一个设备中断
+  } else if(scause == 0x8000000000000001L){ // 检查是否为来自机器模式定时器中断的软件中断
+    // 处理来自 timervec in kernelvec.S的软件中断
 
     if(cpuid() == 0){
-      clockintr();
+      clockintr(); // 仅在 CPU 0 上处理时钟中断
     }
     
-    // acknowledge the software interrupt by clearing
-    // the SSIP bit in sip.
-    w_sip(r_sip() & ~2);
+    w_sip(r_sip() & ~2); // 通过清除 sip 中的 SSIP 位来确认软件中断
 
-    return 2;
+    return 2; // 返回 2，表示处理了定时器中断
   } else {
-    return 0;
+    return 0; // 返回 0，表示未识别的中断
   }
 }
 

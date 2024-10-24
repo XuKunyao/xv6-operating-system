@@ -81,13 +81,18 @@ sys_read(void)
 uint64
 sys_write(void)
 {
-  struct file *f;
-  int n;
-  uint64 p;
+  struct file *f;  // 声明一个指向文件结构体的指针 f
+  int n;           // 声明一个整数 n，用于存储要写入的字节数
+  uint64 p;       // 声明一个无符号整数 p，用于存储写入数据的缓冲区地址
 
+  // 获取第一个参数（文件描述符）并将其转换为文件指针 f；
+  // 获取第二个参数（缓冲区地址）并将其存储在 p 中；
+  // 获取第三个参数（要写入的字节数）并将其存储在 n 中。
+  // 如果任何一个参数获取失败，则返回 -1。
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
 
+  // 调用 filewrite 函数，将数据从缓冲区 p 写入到文件 f，写入的字节数为 n。
   return filewrite(f, p, n);
 }
 

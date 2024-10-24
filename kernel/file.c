@@ -129,54 +129,61 @@ fileread(struct file *f, uint64 addr, int n)
   return r;
 }
 
-// Write to file f.
-// addr is a user virtual address.
+// 向文件 f 写入数据。
+// addr 是用户虚拟地址。
 int
 filewrite(struct file *f, uint64 addr, int n)
 {
-  int r, ret = 0;
+  int r, ret = 0; // 声明变量 r 用于存储操作结果，ret 用于记录成功写入的字节数
 
+  // 如果文件不具有可写权限，返回 -1
   if(f->writable == 0)
     return -1;
 
+  // 根据文件类型执行不同的写入操作
   if(f->type == FD_PIPE){
+    // 如果文件类型是管道，调用 pipewrite 函数进行写入
     ret = pipewrite(f->pipe, addr, n);
   } else if(f->type == FD_DEVICE){
+    // 如果文件类型是设备
     if(f->major < 0 || f->major >= NDEV || !devsw[f->major].write)
+      // 检查设备编号是否有效以及该设备是否支持写入
       return -1;
+    // 调用设备的写入函数进行写入
     ret = devsw[f->major].write(1, addr, n);
   } else if(f->type == FD_INODE){
-    // write a few blocks at a time to avoid exceeding
-    // the maximum log transaction size, including
-    // i-node, indirect block, allocation blocks,
-    // and 2 blocks of slop for non-aligned writes.
-    // this really belongs lower down, since writei()
-    // might be writing a device like the console.
-    int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
-    int i = 0;
-    while(i < n){
-      int n1 = n - i;
-      if(n1 > max)
+    // 如果文件类型是 inode（表示常规文件）
+    // 为了避免超过最大日志事务大小，逐块写入
+    // 包括 i-node、间接块、分配块，以及用于非对齐写入的 2 块空间
+    // 这里 max 是每次写入的最大字节数
+    int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE; 
+    int i = 0; // 初始化写入的字节数
+
+    while(i < n){ // 当写入字节数小于 n 时，继续写入
+      int n1 = n - i; // 剩余要写入的字节数
+      if(n1 > max) // 如果剩余字节数大于 max，调整为 max
         n1 = max;
 
-      begin_op();
-      ilock(f->ip);
+      begin_op(); // 开始一个新的操作
+      ilock(f->ip); // 锁定 inode
+      // 写入数据到文件中，writei 返回实际写入的字节数
       if ((r = writei(f->ip, 1, addr + i, f->off, n1)) > 0)
-        f->off += r;
-      iunlock(f->ip);
-      end_op();
+        f->off += r; // 更新文件偏移量
+      iunlock(f->ip); // 解锁 inode
+      end_op(); // 结束操作
 
-      if(r < 0)
+      if(r < 0) // 如果写入失败，退出循环
         break;
-      if(r != n1)
+      if(r != n1) // 如果实际写入字节数少于预期，触发 panic
         panic("short filewrite");
-      i += r;
+      i += r; // 增加已写入的字节数
     }
-    ret = (i == n ? n : -1);
+    ret = (i == n ? n : -1); // 如果成功写入的字节数等于 n，设置 ret 为 n，否则设置为 -1
   } else {
-    panic("filewrite");
+    panic("filewrite"); // 如果文件类型不匹配，触发 panic
   }
 
-  return ret;
+  return ret; // 返回成功写入的字节数或 -1 表示错误
 }
+
 

@@ -101,15 +101,12 @@ walkaddr(pagetable_t pagetable, uint64 va)
     return 0;
 
   pte = walk(pagetable, va, 0);
-  if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0){ // 如果访问到懒分配还没实际分配的页
-    if(is_lazy_alloc_va(va)){ // 判断是否是懒分配造成的
-      if(lazy_alloc(va) < 0){ // 如果是懒分配造成的，调用 lazy_alloc 函数分配内存或映射
-        return 0; // 如果分配内存或映射失败，返回 0
-      }
-      return walkaddr(pagetable, va); // 如果分配成功，重新获取地址并返回物理地址(此时不会再进入if判断，因为已经映射pte)
-    }
-    return 0; // 不是懒分配导致的无效或空页表项，直接返回 0
-  }
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  if((*pte & PTE_U) == 0)
+    return 0;
   pa = PTE2PA(*pte);
   return pa;
 }
@@ -184,11 +181,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      continue;
-      // panic("uvmunmap: walk");
+      panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0)
-      continue;
-      // panic("uvmunmap: not mapped");
+      panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -304,36 +299,47 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
-// Given a parent process's page table, copy
-// its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
-// returns 0 on success, -1 on failure.
-// frees any allocated pages on failure.
+/**
+  * int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+  * @brief: 将父进程的页表复制到子进程，复制内存和页表。
+  * @brief: // Given a parent process's page table, copy
+            // its memory into a child's page table.
+            // Copies both the page table and the
+            // physical memory.
+            // returns 0 on success, -1 on failure.
+            // frees any allocated pages on failure.
+  * @param: old - 父进程的页表
+  * @param: new - 子进程的页表
+  * @param: sz - 需要复制的大小
+  * @retval: 成功返回 0，失败返回 -1
+  */
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      continue;
-      // panic("uvmcopy: pte should exist");
+      panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      continue;
-      // panic("uvmcopy: page not present");
+      panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    *pte = *pte & ~(PTE_W); // 取消pte的写标志位
+    *pte = *pte | PTE_COW; //设置pte的PTE_COW标志位
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+
+    // 将父进程的物理页直接 map 到子进程 （懒复制）
+    // 权限设置和父进程一致
+    // 不可写+PTE_COW
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
+    incr((void *)pa); // 将物理页的引用次数增加 1
   }
   return 0;
 
@@ -365,6 +371,12 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if(is_cow_fault(pagetable, va0)){
+      if(cow_alloc(pagetable, va0) < 0){
+        printf("copyout:cowalloc failed!\n");
+        return -1;
+      }
+    }
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -446,4 +458,59 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+/**
+  * void is_cow_fault(pagetable_t pagetable, uint64 va)
+  * @brief：检查一个虚拟地址在一个给定的页表中是否具有写时复制（Copy-On-Write）的权限
+  * @param：pagetable - 当前进程的页表
+  * @param：va - 触发写时拷贝 (COW) 异常的虚拟地址
+  * @retval：如果虚拟地址具有写时复制权限则返回1，否则返回0。
+  */
+int is_cow_fault(pagetable_t pagetable, uint64 va){
+  if(va > MAXVA){
+    return 0;
+  }
+  pte_t *pte = walk(pagetable, va, 0); // 调用walk函数查找当前虚拟地址va对应的pte
+  // 一些前置的判断
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  if((*pte & PTE_U) == 0)
+    return 0;
+  if(*pte & PTE_COW){ // 检查pagetable中的某个标志位是否设置了写时复制（PTE_COW）标志
+    return 1; // 如果设置了标志，则返回1，表示是COW page fault
+  }
+  return 0; // 如果没有设置标志，则返回0，表示不是COW page fault
+}
+
+/**
+  * void cow_alloc(pagetable_t pagetable, uint64 va)
+  * @brief：为出现 COW 访问异常的页分配一个新的物理页，并更新页表项，
+  * @brief：将虚拟地址重新映射到这个新分配的物理页，以实现对该页的独立写操作
+  * @param：pagetable - 当前进程的页表
+  * @param：va - 触发写时拷贝 (COW) 异常的虚拟地址
+  * @retval：0 表示操作成功，-1 表示操作失败
+  */
+int cow_alloc(pagetable_t pagetable, uint64 va){
+  va = PGROUNDDOWN(va);  // 将虚拟地址对齐到页面大小，保证页对齐
+  pte_t *pte = walk(pagetable, va, 0); // 找到虚拟地址 va 对应的页表项 (PTE)
+  uint64 pa = PTE2PA(*pte); // 从页表项中提取对应的物理地址
+  int flag = PTE_FLAGS(*pte); // 提取页表项中的标志位
+
+  char *mem = kalloc(); // 分配一个新的物理内存页，用来替代 COW 的共享页
+  if(mem == 0){ // 如果内存分配失败，返回错误代码 -1
+    return -1;
+  }
+  memmove(mem, (char *)pa, PGSIZE); // 将原物理页的数据拷贝到新分配的物理页中，实现写时拷贝
+  uvmunmap(pagetable, va, 1, 1); // 将va所对应的一页（npages=1）的映射解除，并且释放对应的物理内存（do_free=1）
+
+  flag &= ~(PTE_COW); // 清除 COW 标志位
+  flag |= PTE_W; // 设置可写标志
+  if(mappages(pagetable, va, PGSIZE, (uint64)mem, flag) < 0){ // 将新分配的物理页重新映射到虚拟地址 va，并且应用更新后的权限标志
+    kfree(mem); // 如果映射失败，释放新分配的物理内存，并返回-1
+    return -1;
+  }
+  return 0; // 如果映射成功，返回 0
 }

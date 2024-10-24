@@ -47,19 +47,8 @@ sys_sbrk(void)
   if(argint(0, &n) < 0)
     return -1;
   addr = myproc()->sz;
-  // if(growproc(n) < 0)
-  //   return -1;
-  uint64 sz = myproc()->sz;
-  if(n > 0){
-    sz = sz + n;
-  }else{
-    if(sz + n < 0){ // n小于0，调用 uvmdealloc() 函数来释放内存，并更新进程的 sz 值
-      return -1;
-    }else{
-      sz = uvmdealloc(myproc()->pagetable, sz, sz + n); // 处理sbrk()参数为负数的情况
-    }
-  }
-  myproc()->sz = sz;
+  if(growproc(n) < 0)
+    return -1;
   return addr;
 }
 

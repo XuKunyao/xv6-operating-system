@@ -52,25 +52,35 @@ struct {
   uint e;  // Edit index
 } cons;
 
-//
 // user write()s to the console go here.
-//
-int
-consolewrite(int user_src, uint64 src, int n)
-{
-  int i;
+int consolewrite(int user_src, uint64 src, int n) {
+  int i;  // 用于循环计数
 
+  // 获取控制台的锁，确保写入操作的互斥
   acquire(&cons.lock);
-  for(i = 0; i < n; i++){
-    char c;
-    if(either_copyin(&c, user_src, src+i, 1) == -1)
+  
+  // 循环遍历要写入的字符数
+  for(i = 0; i < n; i++) {
+    char c; // 定义一个字符变量，用于存储从用户空间读取的字符
+
+    // 从用户空间的地址 src+i 读取一个字符到变量 c
+    // either_copyin 函数用于处理用户空间和内核空间之间的复制
+    // user_src 指示数据源是用户空间（1）还是内核空间（0）
+    // 如果读取失败，退出循环
+    if(either_copyin(&c, user_src, src + i, 1) == -1)
       break;
+
+    // 调用 uartputc 函数将字符 c 写入 UART（串口），显示在控制台上
     uartputc(c);
   }
+
+  // 释放控制台的锁，允许其他进程访问控制台
   release(&cons.lock);
 
+  // 返回实际写入的字符数 i
   return i;
 }
+
 
 //
 // user read()s from the console go here.

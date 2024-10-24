@@ -253,40 +253,6 @@ growproc(int n)
   return 0;
 }
 
-// 判断是否是lazy alloc引起的page fault
-int 
-is_lazy_alloc_va(uint64 va){
-  struct proc *p = myproc(); // 获取当前进程结构体
-  if(va >= p->sz){ // 如果va地址大于当前进程的sz地址
-    return 0;
-  }
-  // 栈指针向下取整到栈指针向下取整减一个PGSIZE之间对应的范围就是guard page
-  // 如果va地址落入保护页则不进行懒分配，否则会报remap错误
-  if(va < PGROUNDDOWN(p->trapframe->sp) && va >= PGROUNDDOWN(p->trapframe->sp) - PGSIZE){
-    return 0;
-  }
-  return 1;
-}
-
-// 进行lazy alloc
-// 本函数参照uvmalloc()函数
-int
-lazy_alloc(uint64 va){
-  char *mem; // 用于存储分配的内存
-  va = PGROUNDDOWN(va); // va向下取整
-  mem = kalloc(); // 分配内存
-  if(mem == 0){ // 检查内存是否分配成功
-    return -1;  // 如果失败，返回-1
-  }
-  memset(mem, 0, PGSIZE); // 初始化分配的内存
-  struct proc *p = myproc(); // 获取当前进程结构体
-  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
-    kfree(mem); // 如果映射失败，释放内存
-    return -1;
-  }
-  return 0;
-}
-
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
