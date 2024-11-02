@@ -9,5 +9,7 @@
 #define MAXOPBLOCKS  10  // max # of blocks any FS op writes
 #define LOGSIZE      (MAXOPBLOCKS*3)  // max data blocks in on-disk log
 #define NBUF         (MAXOPBLOCKS*3)  // size of disk block cache
-#define FSSIZE       1000  // size of file system in blocks
+#define FSSIZE       10000  // size of file system in blocks
 #define MAXPATH      128   // maximum file path name
+#define NBUFMAP_BUCKET 13 // 定义了缓冲区缓存的哈希桶数量
+#define BUFMAP_HASH(dev, blockno) ((((dev)<<27)|(blockno))%NBUFMAP_BUCKET) // 用于计算哈希表的哈希函数

@@ -238,117 +238,126 @@ bad:
   return -1;
 }
 
+/**
+  * static struct inode* create()
+  * @brief: 创建指定路径的文件或目录，若路径存在同名文件且类型匹配则直接返回inode。
+  * @param path: 文件或目录的路径名
+  * @param type: 创建项的类型 (T_FILE表示文件，T_DIR表示目录)
+  * @param major: 若创建设备文件，表示设备的主编号
+  * @param minor: 若创建设备文件，表示设备的次编号
+  * @retval: 返回指向新创建或已存在的inode的指针；若创建失败则返回0
+  */
 static struct inode*
 create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;
-  char name[DIRSIZ];
+  char name[DIRSIZ]; // 存储路径中最后的文件或目录名
 
-  if((dp = nameiparent(path, name)) == 0)
+  if((dp = nameiparent(path, name)) == 0) // 获取路径中的父目录的inode，并将文件/目录名存入name中
     return 0;
 
-  ilock(dp);
+  ilock(dp); // 锁定父目录的inode以进行安全操作
 
-  if((ip = dirlookup(dp, name, 0)) != 0){
-    iunlockput(dp);
-    ilock(ip);
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
-      return ip;
-    iunlockput(ip);
-    return 0;
+  if((ip = dirlookup(dp, name, 0)) != 0){ // 检查父目录中是否已经存在相同名称的文件或目录
+    iunlockput(dp); // 若已存在，解锁并释放父目录的inode
+    ilock(ip); // 锁定已有的inode以进行下一步操作
+    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE)) // 若类型是文件且已有的inode类型也为文件或设备，则可以直接使用已有的inode
+      return ip; // 返回已存在的inode
+    iunlockput(ip); // 若类型不匹配，解锁并释放inode
+    return 0; // 返回失败
   }
 
-  if((ip = ialloc(dp->dev, type)) == 0)
-    panic("create: ialloc");
+  if((ip = ialloc(dp->dev, type)) == 0) // 若同名文件不存在，分配一个新的inode
+    panic("create: ialloc"); // 若分配失败则终止
 
-  ilock(ip);
-  ip->major = major;
-  ip->minor = minor;
-  ip->nlink = 1;
-  iupdate(ip);
+  ilock(ip); // 锁定新分配的inode并初始化相关字段
+  ip->major = major; // 设置主设备号
+  ip->minor = minor; // 设置次设备号
+  ip->nlink = 1; // 设置链接计数
+  iupdate(ip);  // 将inode更新写入磁盘
 
-  if(type == T_DIR){  // Create . and .. entries.
-    dp->nlink++;  // for ".."
-    iupdate(dp);
+  if(type == T_DIR){  // 若创建的是目录，则初始化.和..目录项
+    dp->nlink++; // 父目录链接数加1，用于引用..
+    iupdate(dp);  // 更新父目录信息到磁盘
     // No ip->nlink++ for ".": avoid cyclic ref count.
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       panic("create dots");
   }
 
-  if(dirlink(dp, name, ip->inum) < 0)
+  if(dirlink(dp, name, ip->inum) < 0) // 将新文件/目录链接到父目录
     panic("create: dirlink");
 
-  iunlockput(dp);
+  iunlockput(dp); // 解锁并释放父目录的inode
 
-  return ip;
+  return ip; // 返回新创建的inode指针
 }
 
 uint64
 sys_open(void)
 {
-  char path[MAXPATH];
-  int fd, omode;
-  struct file *f;
-  struct inode *ip;
+  char path[MAXPATH]; // 定义路径字符数组
+  int fd, omode; // 定义文件描述符(fd)变量，打开模式(omode)变量
+  struct file *f; // 定义指向文件(file)
+  struct inode *ip; // 定义inode的指针
   int n;
 
-  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
-    return -1;
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0) // 检查传入参数：读取路径名字符串到path，读取打开模式到omode
+    return -1; // 若参数不正确，则返回错误
 
-  begin_op();
+  begin_op(); // 开启文件系统操作（设置事务）
 
-  if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
-    if(ip == 0){
-      end_op();
-      return -1;
+  if(omode & O_CREATE){ // 检查是否需要创建文件
+    ip = create(path, T_FILE, 0, 0); // 若需要创建文件，调用create函数创建新文件的inode并返回inode指针
+    if(ip == 0){ // 若创建失败
+      end_op();  // 结束文件系统操作
+      return -1; // 返回错误
     }
-  } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
+  } else { // 如果不需要创建文件
+    if((ip = namei(path)) == 0){ // 使用namei函数查找路径对应的inode
+      end_op(); // 若路径不存在，结束文件系统操作
+      return -1; // 返回错误
     }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
-      iunlockput(ip);
-      end_op();
+    ilock(ip); // 锁定inode
+    if(ip->type == T_DIR && omode != O_RDONLY){ // 如果inode是目录且打开模式不是只读，则返回错误（目录不可写）
+      iunlockput(ip); // 释放inode锁并减少引用计数
+      end_op(); // 结束文件系统操作
       return -1;
     }
   }
 
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
-    iunlockput(ip);
-    end_op();
+  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){ // 若inode为设备类型，但major编号不合法，则返回错误
+    iunlockput(ip); // 释放inode锁并减少引用计数
+    end_op(); // 结束文件系统操作
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
-    if(f)
-      fileclose(f);
-    iunlockput(ip);
-    end_op();
+  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){ // 为文件分配file结构并为它分配文件描述符
+    if(f) // 如果file分配成功但fd分配失败
+      fileclose(f); // 关闭文件并释放资源
+    iunlockput(ip); // 释放inode锁并减少引用计数
+    end_op(); // 结束文件系统操作
     return -1;
   }
 
-  if(ip->type == T_DEVICE){
+  if(ip->type == T_DEVICE){ // 如果inode类型为设备，设置文件类型为FD_DEVICE，并记录设备主编号
     f->type = FD_DEVICE;
     f->major = ip->major;
-  } else {
+  } else { // 否则将文件类型设置为FD_INODE，偏移量初始化为0
     f->type = FD_INODE;
     f->off = 0;
   }
-  f->ip = ip;
-  f->readable = !(omode & O_WRONLY);
-  f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+  f->ip = ip; // 设置file结构中的inode和读写权限
+  f->readable = !(omode & O_WRONLY); // 若omode不是只写，则可读
+  f->writable = (omode & O_WRONLY) || (omode & O_RDWR); // 若omode是只写或可读可写，则可写
 
-  if((omode & O_TRUNC) && ip->type == T_FILE){
+  if((omode & O_TRUNC) && ip->type == T_FILE){ // 如果模式包含O_TRUNC且inode类型为文件，截断文件内容
     itrunc(ip);
   }
 
-  iunlock(ip);
-  end_op();
+  iunlock(ip); // 释放inode锁
+  end_op(); // 结束文件系统操作
 
-  return fd;
+  return fd; // 返回分配的文件描述符
 }
 
 uint64

@@ -87,20 +87,20 @@ struct proc {
   struct spinlock lock;
 
   // p->lock must be held when using these:
-  enum procstate state;        // Process state 进程状态枚举
-  struct proc *parent;         // Parent process  父进程
-  void *chan;                  // If non-zero, sleeping on chan  如果非0,表示当前进程睡眠在某个条件变量上
-  int killed;                  // If non-zero, have been killed  如果非0,表示当前进程被杀死了
-  int xstate;                  // Exit status to be returned to parent's wait 进程
-  int pid;                     // Process ID  
+  enum procstate state;        // Process state
+  struct proc *parent;         // Parent process
+  void *chan;                  // If non-zero, sleeping on chan
+  int killed;                  // If non-zero, have been killed
+  int xstate;                  // Exit status to be returned to parent's wait
+  int pid;                     // Process ID
 
   // these are private to the process, so p->lock need not be held.
-  uint64 kstack;               // Virtual address of kernel stack   进程内核栈地址
-  uint64 sz;                   // Size of process memory (bytes)    sbrk指针目前位置,进程已用的内存范围: 0~sz 
-  pagetable_t pagetable;       // User page table  进程用户态页表地址                     
-  struct trapframe *trapframe; // data page for trampoline.S  trapframe地址
-  struct context context;      // swtch() here to run process  内核态寄存器状态保存
-  struct file *ofile[NOFILE];  // Open files  进程打开的文件列表
-  struct inode *cwd;           // Current directory 当前工作目录
-  char name[16];               // Process name (debugging) 程序名字
+  uint64 kstack;               // Virtual address of kernel stack
+  uint64 sz;                   // Size of process memory (bytes)
+  pagetable_t pagetable;       // User page table
+  struct trapframe *trapframe; // data page for trampoline.S
+  struct context context;      // swtch() here to run process
+  struct file *ofile[NOFILE];  // Open files
+  struct inode *cwd;           // Current directory
+  char name[16];               // Process name (debugging)
 };

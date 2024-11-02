@@ -498,25 +498,24 @@ scheduler(void)
 // be proc->intena and proc->noff, but that would
 // break in the few places where a lock is held but
 // there's no process.
-// yield函数中已经获取了当前进程的锁
 void
 sched(void)
 {
   int intena;
   struct proc *p = myproc();
 
-  if(!holding(&p->lock)) // 当前cpu必须获取了当前进程锁
+  if(!holding(&p->lock))
     panic("sched p->lock");
-  if(mycpu()->noff != 1) // 当前cpu只能持有一把锁  
+  if(mycpu()->noff != 1)
     panic("sched locks");
-  if(p->state == RUNNING) // 当前进程不能是正在运行状态  
+  if(p->state == RUNNING)
     panic("sched running");
-  if(intr_get()) // 中断要关闭 
+  if(intr_get())
     panic("sched interruptible");
 
-  intena = mycpu()->intena; // 保存cpu加锁前的中断状态
-  swtch(&p->context, &mycpu()->context); // 跳转到scheduler函数进行任务调度--->scheduler函数由调度器线程执行
-  mycpu()->intena = intena; // 恢复cpu加锁前的中断状态
+  intena = mycpu()->intena;
+  swtch(&p->context, &mycpu()->context);
+  mycpu()->intena = intena;
 }
 
 // Give up the CPU for one scheduling round.

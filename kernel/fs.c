@@ -189,27 +189,31 @@ iinit()
 
 static struct inode* iget(uint dev, uint inum);
 
-// Allocate an inode on device dev.
-// Mark it as allocated by  giving it type type.
-// Returns an unlocked but allocated and referenced inode.
+/**
+  * struct inode* ialloc()
+  * @brief: 在指定设备上分配一个新的 inode，并将其类型设定为指定的 type。
+  * @param dev: 设备号，表示在哪个设备上分配 inode
+  * @param type: inode 的类型 (例如，T_FILE 表示文件，T_DIR 表示目录)
+  * @retval: 返回一个已分配但未加锁、已引用的 inode 指针；如果没有空闲 inode 可用，则会终止系统
+  */
 struct inode*
 ialloc(uint dev, short type)
 {
-  int inum;
-  struct buf *bp;
-  struct dinode *dip;
+  int inum; // 定义变量 inum，用于表示 inode 编号
+  struct buf *bp; // 定义一个指向缓冲区的指针
+  struct dinode *dip; // 定义一个指向磁盘 inode 结构的指针
 
-  for(inum = 1; inum < sb.ninodes; inum++){
-    bp = bread(dev, IBLOCK(inum, sb));
-    dip = (struct dinode*)bp->data + inum%IPB;
-    if(dip->type == 0){  // a free inode
-      memset(dip, 0, sizeof(*dip));
-      dip->type = type;
-      log_write(bp);   // mark it allocated on the disk
-      brelse(bp);
-      return iget(dev, inum);
+  for(inum = 1; inum < sb.ninodes; inum++){ // 循环遍历所有 inode（从 1 开始，避免使用 0 号 inode）
+    bp = bread(dev, IBLOCK(inum, sb)); // 读取包含该 inode 的磁盘 block
+    dip = (struct dinode*)bp->data + inum%IPB; // 定位到 inum 对应的 dinode 在 block 中的具体位置
+    if(dip->type == 0){  // 检查该 inode 是否为空闲状态（类型为 0 表示空闲）
+      memset(dip, 0, sizeof(*dip)); // 清零该 dinode 的内容，初始化 inode
+      dip->type = type; // 设置 inode 的类型为指定的 type 值，标记为已分配
+      log_write(bp); // 将已分配的 inode 信息写入日志，以便写回磁盘
+      brelse(bp); // 释放缓冲区
+      return iget(dev, inum); // 获取并返回新分配的 inode（未加锁但已分配并被引用）
     }
-    brelse(bp);
+    brelse(bp); // 若当前 inode 已被占用，释放缓冲区继续下一个 inode
   }
   panic("ialloc: no inodes");
 }
