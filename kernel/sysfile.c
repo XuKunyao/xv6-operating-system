@@ -238,58 +238,49 @@ bad:
   return -1;
 }
 
-/**
-  * static struct inode* create()
-  * @brief: 创建指定路径的文件或目录，若路径存在同名文件且类型匹配则直接返回inode。
-  * @param path: 文件或目录的路径名
-  * @param type: 创建项的类型 (T_FILE表示文件，T_DIR表示目录)
-  * @param major: 若创建设备文件，表示设备的主编号
-  * @param minor: 若创建设备文件，表示设备的次编号
-  * @retval: 返回指向新创建或已存在的inode的指针；若创建失败则返回0
-  */
 static struct inode*
 create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;
-  char name[DIRSIZ]; // 存储路径中最后的文件或目录名
+  char name[DIRSIZ];
 
-  if((dp = nameiparent(path, name)) == 0) // 获取路径中的父目录的inode，并将文件/目录名存入name中
+  if((dp = nameiparent(path, name)) == 0)
     return 0;
 
-  ilock(dp); // 锁定父目录的inode以进行安全操作
+  ilock(dp);
 
-  if((ip = dirlookup(dp, name, 0)) != 0){ // 检查父目录中是否已经存在相同名称的文件或目录
-    iunlockput(dp); // 若已存在，解锁并释放父目录的inode
-    ilock(ip); // 锁定已有的inode以进行下一步操作
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE)) // 若类型是文件且已有的inode类型也为文件或设备，则可以直接使用已有的inode
-      return ip; // 返回已存在的inode
-    iunlockput(ip); // 若类型不匹配，解锁并释放inode
-    return 0; // 返回失败
+  if((ip = dirlookup(dp, name, 0)) != 0){
+    iunlockput(dp);
+    ilock(ip);
+    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+      return ip;
+    iunlockput(ip);
+    return 0;
   }
 
-  if((ip = ialloc(dp->dev, type)) == 0) // 若同名文件不存在，分配一个新的inode
-    panic("create: ialloc"); // 若分配失败则终止
+  if((ip = ialloc(dp->dev, type)) == 0)
+    panic("create: ialloc");
 
-  ilock(ip); // 锁定新分配的inode并初始化相关字段
-  ip->major = major; // 设置主设备号
-  ip->minor = minor; // 设置次设备号
-  ip->nlink = 1; // 设置链接计数
-  iupdate(ip);  // 将inode更新写入磁盘
+  ilock(ip);
+  ip->major = major;
+  ip->minor = minor;
+  ip->nlink = 1;
+  iupdate(ip);
 
-  if(type == T_DIR){  // 若创建的是目录，则初始化.和..目录项
-    dp->nlink++; // 父目录链接数加1，用于引用..
-    iupdate(dp);  // 更新父目录信息到磁盘
+  if(type == T_DIR){  // Create . and .. entries.
+    dp->nlink++;  // for ".."
+    iupdate(dp);
     // No ip->nlink++ for ".": avoid cyclic ref count.
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       panic("create dots");
   }
 
-  if(dirlink(dp, name, ip->inum) < 0) // 将新文件/目录链接到父目录
+  if(dirlink(dp, name, ip->inum) < 0)
     panic("create: dirlink");
 
-  iunlockput(dp); // 解锁并释放父目录的inode
+  iunlockput(dp);
 
-  return ip; // 返回新创建的inode指针
+  return ip;
 }
 
 uint64
@@ -312,15 +303,34 @@ sys_open(void)
       end_op();  // 结束文件系统操作
       return -1; // 返回错误
     }
-  } else { // 如果不需要创建文件
-    if((ip = namei(path)) == 0){ // 使用namei函数查找路径对应的inode
-      end_op(); // 若路径不存在，结束文件系统操作
-      return -1; // 返回错误
+  }else {
+    int symlink_depth = 0; // 初始化符号链接递归深度计数
+    while(1) { // 循环处理符号链接，递归跟随直到找到非符号链接的文件
+      if((ip = namei(path)) == 0){ // 查找文件路径对应的inode
+        end_op(); // 若找不到文件，返回错误
+        return -1;
+      }
+      ilock(ip); // 锁定该inode，保证线程安全
+      // 如果文件类型为符号链接且未设置O_NOFOLLOW标志，则跟随链接
+      if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
+        if(++symlink_depth > 10) { // 超过递归限制，可能存在循环
+          iunlockput(ip); // 解锁并释放inode
+          end_op();
+          return -1;
+        }
+        if(readi(ip, 0, (uint64)path, 0, MAXPATH) < 0) { // 读取符号链接的目标路径到path
+          iunlockput(ip); // 读取失败，释放inode
+          end_op();
+          return -1;
+        }
+        iunlockput(ip); // 释放符号链接inode，继续递归查找目标文件
+      } else {
+        break;  // 找到非符号链接文件或设置了O_NOFOLLOW，退出循环
+      }
     }
-    ilock(ip); // 锁定inode
-    if(ip->type == T_DIR && omode != O_RDONLY){ // 如果inode是目录且打开模式不是只读，则返回错误（目录不可写）
-      iunlockput(ip); // 释放inode锁并减少引用计数
-      end_op(); // 结束文件系统操作
+    if(ip->type == T_DIR && omode != O_RDONLY){ // 检查如果是目录类型且打开模式不是只读，则返回错误
+      iunlockput(ip);
+      end_op();
       return -1;
     }
   }
@@ -491,5 +501,43 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+/**
+  * uint64 sys_symlink()
+  * @brief: 创建一个符号链接文件，指向目标路径。
+  * @param: 无直接传入参数，但系统调用时会传入两个参数：
+  *         - target: 目标文件路径，即符号链接将指向的路径。
+  *         - path: 符号链接文件的路径，即新创建的符号链接的名称。
+  * @retval: 返回0表示创建成功，返回-1表示创建失败。
+  */
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH]; // 用于存储目标路径和符号链接文件的路径
+  struct inode *ip;
+
+  // 获取系统调用的两个字符串参数，分别是符号链接的目标路径和符号链接文件的路径
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op(); // 开始文件系统事务，保证文件创建操作的原子性
+  ip = create(path, T_SYMLINK, 0, 0); // 使用create函数创建一个新的inode来存储符号链接文件
+  if(ip == 0){
+    end_op(); // 文件创建失败，结束事务
+    return -1;
+  }
+
+  // 使用writei函数将目标路径写入符号链接文件的第一个数据块
+  // 这样，符号链接文件包含了指向目标文件的路径
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0) {
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip); // 解锁并释放该 inode，表明文件创建完成
+
+  end_op();
   return 0;
 }

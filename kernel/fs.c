@@ -209,7 +209,7 @@ ialloc(uint dev, short type)
     if(dip->type == 0){  // 检查该 inode 是否为空闲状态（类型为 0 表示空闲）
       memset(dip, 0, sizeof(*dip)); // 清零该 dinode 的内容，初始化 inode
       dip->type = type; // 设置 inode 的类型为指定的 type 值，标记为已分配
-      log_write(bp); // 将已分配的 inode 信息写入日志，以便写回磁盘
+      log_write(bp); // 将已分配的 inode 信息写入日志，以便写回磁盘    
       brelse(bp); // 释放缓冲区
       return iget(dev, inum); // 获取并返回新分配的 inode（未加锁但已分配并被引用）
     }
@@ -369,75 +369,134 @@ iunlockput(struct inode *ip)
   iput(ip);
 }
 
-// Inode content
+// Inode 内容
 //
-// The content (data) associated with each inode is stored
-// in blocks on the disk. The first NDIRECT block numbers
-// are listed in ip->addrs[].  The next NINDIRECT blocks are
-// listed in block ip->addrs[NDIRECT].
+// 与每个 inode 相关联的内容（数据）存储在磁盘上的块中
+// 前 NDIRECT 个块号直接存储在 ip->addrs[] 中
+// 下一个 NINDIRECT 块号存储在块 ip->addrs[NDIRECT] 中（即间接块）
 
-// Return the disk block address of the nth block in inode ip.
-// If there is no such block, bmap allocates one.
+/**
+  * static uint bmap()
+  * @brief 获取 inode 中第 bn 个块的磁盘块地址，如果没有该块则分配一个
+  * @param ip 指向 inode 的指针
+  * @param bn 要访问的块编号（从 0 开始）
+  * @retval 第 bn 个块在磁盘上的块地址
+  */
 static uint
 bmap(struct inode *ip, uint bn)
 {
   uint addr, *a;
   struct buf *bp;
 
-  if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0)
-      ip->addrs[bn] = addr = balloc(ip->dev);
-    return addr;
+  if(bn < NDIRECT){ // 若 bn 小于 NDIRECT，则 bn 对应直接块
+    if((addr = ip->addrs[bn]) == 0) // 如果地址为 0，说明该块未分配
+      ip->addrs[bn] = addr = balloc(ip->dev); // 分配一个新块，并存储其地址
+    return addr; // 返回该直接块的地址
   }
-  bn -= NDIRECT;
+  bn -= NDIRECT; // 若块编号超出直接块范围，则调整索引为间接块的编号
 
-  if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
+  // 单重间接块处理
+  if(bn < NINDIRECT){ // 如果 bn 小于 NINDIRECT，则 bn 对应间接块
+     // 加载间接块地址，若尚未分配则分配一个新的
     if((addr = ip->addrs[NDIRECT]) == 0)
-      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
-      a[bn] = addr = balloc(ip->dev);
-      log_write(bp);
+      ip->addrs[NDIRECT] = addr = balloc(ip->dev); // 分配一个间接块的存储地址
+    bp = bread(ip->dev, addr); // 读取间接块
+    a = (uint*)bp->data; // 将间接块数据视为地址数组
+    if((addr = a[bn]) == 0){ // 若间接块中该位置为 0，表示尚未分配
+      a[bn] = addr = balloc(ip->dev); // 为该位置分配新的磁盘块
+      log_write(bp); // 将间接块的修改写入日志
     }
-    brelse(bp);
-    return addr;
+    brelse(bp); // 释放缓冲区
+    return addr; // 返回该间接块中的目标块地址
   }
 
-  panic("bmap: out of range");
+  // 双重间接块处理
+  bn -= NINDIRECT; // 转换为双重间接块的编号，前面bn已经减过一次 NDIRECT 了
+
+  if(bn < NINDIRECT * NINDIRECT){ // 如果 bn 小于 NINDIRECT * NINDIRECT，则 bn 对应双重间接块
+    if((addr = ip->addrs[NDIRECT+1]) == 0) // 检查双重间接块的一级间接块地址是否已分配
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev); // 若未分配，则为双重间接块的一级间接块分配新地址
+    bp = bread(ip->dev, addr);  // 读取双重间接块的一级间接块内容
+    a = (uint*)bp->data; // 将缓冲区内容作为一级地址数组
+    if((addr = a[bn/NINDIRECT]) == 0){ // 计算一级间接块索引，若地址为空则分配新块
+      a[bn/NINDIRECT] = addr = balloc(ip->dev); // 为一级间接块分配新的地址
+      log_write(bp); // 将一级间接块的修改写入日志
+    }
+    brelse(bp); // 释放一级间接块的缓冲区
+
+    bn %= NINDIRECT; // 获取双重间接块中二级间接块的索引
+    bp = bread(ip->dev, addr); // 读取二级间接块
+    a = (uint*)bp->data; // 将缓冲区内容作为二级地址数组
+    if((addr = a[bn]) == 0){ // 如果二级间接块中的该地址为空
+      a[bn] = addr = balloc(ip->dev); // 分配新块，并将地址写入二级间接块
+      log_write(bp); // 将二级间接块的修改写入日志
+    }
+    brelse(bp); // 释放缓冲区
+    return addr; // 返回该间接块中的目标块地址
+  }
+
+  panic("bmap: out of range");// 若块编号超出范围，报错
 }
 
-// Truncate inode (discard contents).
-// Caller must hold ip->lock.
+
+/**
+  * void itrunc(struct inode *ip)
+  * @brief: 释放 inode 对应的数据块，从而清空文件内容
+  * @brief: 截断 inode（丢弃其内容）,调用者必须持有 ip->lock
+  * @param: ip 需要被截断内容的 inode 指针
+  * @retval: 无返回值
+  */
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
+  int i, j; // i 和 j 是循环变量，用于遍历直接块和间接块中的数据块
+  struct buf *bp; // 缓冲区指针，用于加载间接块
+  uint *a; // 指向间接块数据的指针，将间接块数据视为地址数组
 
+  // 处理直接块（NDIRECT 个直接块）
   for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
+    if(ip->addrs[i]){ // 检查直接块地址是否有效（非 0）
+      bfree(ip->dev, ip->addrs[i]); // 释放该块，将块标记为空闲
+      ip->addrs[i] = 0; // 将 inode 的地址设为 0，表示未分配
     }
   }
 
-  if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
+  // 处理单重间接块
+  if(ip->addrs[NDIRECT]){ // 检查间接块地址是否有效
+    bp = bread(ip->dev, ip->addrs[NDIRECT]); // 从磁盘中读取单重间接块的内容
+    a = (uint*)bp->data; // 将缓冲区数据视为地址数组
+    for(j = 0; j < NINDIRECT; j++){ // 遍历间接块中的每一个数据块地址
+      if(a[j]) // 如果间接块中的数据块地址非 0，表示已分配
+        bfree(ip->dev, a[j]); // 释放该数据块
     }
-    brelse(bp);
-    bfree(ip->dev, ip->addrs[NDIRECT]);
-    ip->addrs[NDIRECT] = 0;
+    brelse(bp); // 释放缓冲区，解除锁定
+    bfree(ip->dev, ip->addrs[NDIRECT]); // 释放单重间接块本身
+    ip->addrs[NDIRECT] = 0; // 将 inode 的间接块地址设为 0，表示未分配
+  }
+  
+  // 处理双重间接块
+  if(ip->addrs[NDIRECT+1]){ // 检查是否存在双重间接块
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]); // 从磁盘中读取双重间接块的内容
+    a = (uint*)bp->data; // 将缓冲区数据视为地址数组
+    for(j = 0; j < NINDIRECT; j++){ // 遍历双重间接块中的每一个单重间接块
+      if(a[j]) { // 若地址非 0，表示该单重间接块已分配
+        struct buf *bp2 = bread(ip->dev, a[j]); // 读取该单重间接块的内容
+        uint *a2 = (uint*)bp2->data; // 将其数据视为地址数组
+        for(int k = 0; k < NINDIRECT; k++){ // 遍历单重间接块中的每一个数据块地址
+          if(a2[k]) // 若地址非 0，表示块已分配
+            bfree(ip->dev, a2[k]); // 释放该数据块
+        }
+        brelse(bp2); // 释放内层缓冲区
+        bfree(ip->dev, a[j]); // 释放单重间接块本身
+      }
+    }
+    brelse(bp); // 释放双重间接块缓冲区
+    bfree(ip->dev, ip->addrs[NDIRECT+1]); // 释放双重间接块本身
+    ip->addrs[NDIRECT+1] = 0; // 将 inode 的双重间接块地址设为 0
   }
 
-  ip->size = 0;
-  iupdate(ip);
+  ip->size = 0; // 将文件大小设为 0
+  iupdate(ip); // 将 inode 的更改（即块释放及大小变化）写入磁盘中
 }
 
 // Copy stat information from inode.
@@ -484,6 +543,9 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 // Caller must hold ip->lock.
 // If user_src==1, then src is a user virtual address;
 // otherwise, src is a kernel address.
+// Returns the number of bytes successfully written.
+// If the return value is less than the requested n,
+// there was an error of some kind.
 int
 writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
 {
@@ -500,23 +562,21 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     m = min(n - tot, BSIZE - off%BSIZE);
     if(either_copyin(bp->data + (off % BSIZE), user_src, src, m) == -1) {
       brelse(bp);
-      n = -1;
       break;
     }
     log_write(bp);
     brelse(bp);
   }
 
-  if(n > 0){
-    if(off > ip->size)
-      ip->size = off;
-    // write the i-node back to disk even if the size didn't change
-    // because the loop above might have called bmap() and added a new
-    // block to ip->addrs[].
-    iupdate(ip);
-  }
+  if(off > ip->size)
+    ip->size = off;
 
-  return n;
+  // write the i-node back to disk even if the size didn't change
+  // because the loop above might have called bmap() and added a new
+  // block to ip->addrs[].
+  iupdate(ip);
+
+  return tot;
 }
 
 // Directories
